@@ -4,9 +4,9 @@
 #include <Adafruit_NeoPixel.h>
 
 // ─── NeoPixel ────────────────────────────────────────────────
-#define PIXEL_PIN        48
+#define PIXEL_PIN         48
 #define PIXEL_COUNT       1
-#define PIXEL_BRIGHTNESS 50
+#define PIXEL_BRIGHTNESS  50
 
 Adafruit_NeoPixel pixel(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -17,12 +17,12 @@ Adafruit_NeoPixel pixel(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 #define I2S_DIN_PIN      6    // DOUT (Data In)
 
 #define SAMPLE_RATE      16000
-#define DMA_BUF_COUNT     4
-#define DMA_BUF_LEN     256
+#define DMA_BUF_COUNT    4
+#define DMA_BUF_LEN      256
 
 // ─── Ngưỡng phát hiện âm thanh ───────────────────────────────
 #define NOISE_THRESHOLD  8000  // Giá trị RMS tối thiểu để coi là "có âm thanh". Cần calibrate bằng cách xem output của Serial.printf("RMS: %ld\n", rms); khi có tiếng ồn và khi yên tĩnh.
-#define SILENCE_MS      1500  // Thời gian (ms) để tắt LED sau khi không còn âm thanh
+#define SILENCE_MS       1000  // Thời gian (ms) để tắt LED sau khi không còn âm thanh
 
 // ─── Buffer ──────────────────────────────────────────────────
 int32_t i2sBuffer[DMA_BUF_LEN];
@@ -112,6 +112,8 @@ void loop() {
     );
 
     if (err != ESP_OK || bytesRead == 0) return;
+
+    Serial.write((uint8_t*)i2sBuffer, bytesRead);
 
     size_t samplesRead = bytesRead / sizeof(int32_t);
     int32_t rms = computeRMS(i2sBuffer, samplesRead);
