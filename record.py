@@ -1,147 +1,99 @@
 # record_audio.py
-# Thu âm thanh từ ESP32-S3 + SPH0645 qua Serial và xuất file .wav
+# ESP32 gửi int16 PCM trực tiếp → ghi thẳng vào WAV, không cần convert
 #
-# Yêu cầu:
-#   pip install pyserial
-#
-# Cách dùng:
-#   python record_audio.py --port COM3 --duration 5 --output output.wav
+# Yêu cầu: pip install pyserial
+# Cách dùng: python record_audio.py --port COM3 --duration 5
 
 import serial
 import wave
-import struct
 import argparse
 import time
 import sys
 from datetime import datetime
 
-# ─── Cấu hình mặc định ───────────────────────────────────────
-DEFAULT_PORT      = "COM3"
-DEFAULT_BAUDRATE  = 115200
-DEFAULT_DURATION  = 5        # giây
-DEFAULT_OUTPUT    = "output.wav"
-SAMPLE_RATE       = 16000    # phải khớp với SAMPLE_RATE trong main.cpp
-CHANNELS          = 1        # mono (SPH0645 SEL = GND → LEFT)
-SAMPLE_WIDTH      = 2        # bytes (16-bit PCM cho WAV)
+DEFAULT_PORT     = "COM3"
+DEFAULT_BAUDRATE = 115200
+DEFAULT_DURATION = 5
+DEFAULT_OUTPUT   = "output.wav"
+SAMPLE_RATE      = 16000
+CHANNELS         = 1
+SAMPLE_WIDTH     = 2   # int16 = 2 bytes/sample
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Thu âm thanh từ ESP32-S3 + SPH0645 → file .wav"
-    )
-    parser.add_argument("--port",     default=DEFAULT_PORT,
-                        help=f"Cổng Serial (mặc định: {DEFAULT_PORT})")
-    parser.add_argument("--baud",     default=DEFAULT_BAUDRATE, type=int,
-                        help=f"Baudrate (mặc định: {DEFAULT_BAUDRATE})")
-    parser.add_argument("--duration", default=DEFAULT_DURATION, type=float,
-                        help=f"Thời gian thu âm (giây, mặc định: {DEFAULT_DURATION})")
-    parser.add_argument("--output",   default=DEFAULT_OUTPUT,
-                        help=f"Tên file output (mặc định: {DEFAULT_OUTPUT})")
-    parser.add_argument("--auto-name", action="store_true",
-                        help="Tự đặt tên file theo timestamp (vd: rec_20240101_120000.wav)")
-    return parser.parse_args()
+def record(port, baud, duration, output):
+    total_samples = int(SAMPLE_RATE * duration)
+    total_bytes   = total_samples * SAMPLE_WIDTH
 
+    print(f"[CONFIG] {port} @ {baud}baud | {duration}s | → {output}")
+    print(f"[CONFIG] Cần {total_bytes} bytes ({total_samples} samples @ {SAMPLE_RATE}Hz)")
+    print(f"[WARN]   Đảm bảo ESP32 đang ở RECORDING_MODE = true")
 
-def make_output_name(base: str, auto: bool) -> str:
-    if auto:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"rec_{ts}.wav"
-    return base
-
-
-def record(port: str, baud: int, duration: float, output: str):
-    total_samples  = int(SAMPLE_RATE * duration)
-    # ESP32 gửi raw int32 (4 bytes/sample) → ta đọc 4 bytes rồi chuyển sang int16
-    bytes_per_raw  = 4
-    total_bytes    = total_samples * bytes_per_raw
-
-    print(f"[CONFIG] Port={port} | Baud={baud} | "
-          f"Duration={duration}s | Output={output}")
-    print(f"[CONFIG] SampleRate={SAMPLE_RATE}Hz | Channels={CHANNELS} | "
-          f"Expect {total_samples} samples ({total_bytes} bytes raw)")
-
-    # ── Mở Serial ────────────────────────────────────────────
     try:
         ser = serial.Serial(port, baud, timeout=2)
     except serial.SerialException as e:
-        print(f"[ERROR] Không mở được cổng {port}: {e}")
+        print(f"[ERROR] Không mở được {port}: {e}")
         sys.exit(1)
 
-    # Chờ ESP32 boot xong
     time.sleep(1.5)
     ser.reset_input_buffer()
-    print(f"[INFO]  Đã kết nối {port}. Bắt đầu thu âm {duration}s...")
+    print("[INFO]  Bắt đầu thu âm...\n")
 
-    # ── Thu dữ liệu thô ──────────────────────────────────────
-    raw_data   = bytearray()
+    pcm_data   = bytearray()
     start_time = time.time()
     last_print = start_time
 
-    while len(raw_data) < total_bytes:
-        elapsed = time.time() - start_time
-
-        # Timeout cứng
-        if elapsed > duration + 3:
-            print("\n[WARN]  Timeout — dừng thu âm sớm.")
+    while len(pcm_data) < total_bytes:
+        if time.time() - start_time > duration + 3:
+            print("\n[WARN]  Timeout.")
             break
 
         waiting = ser.in_waiting
         if waiting > 0:
-            chunk = ser.read(min(waiting, total_bytes - len(raw_data)))
-            raw_data.extend(chunk)
+            need  = total_bytes - len(pcm_data)
+            chunk = ser.read(min(waiting, need))
+            pcm_data.extend(chunk)
 
-        # In tiến độ mỗi 0.5s
         if time.time() - last_print >= 0.5:
-            pct = len(raw_data) / total_bytes * 100
+            pct = len(pcm_data) / total_bytes * 100
             bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-            print(f"\r[REC]   [{bar}] {pct:5.1f}%  "
-                  f"{len(raw_data)}/{total_bytes} bytes", end="", flush=True)
+            elapsed = time.time() - start_time
+            print(f"\r[REC]   [{bar}] {pct:5.1f}%  {elapsed:.1f}s",
+                  end="", flush=True)
             last_print = time.time()
 
         time.sleep(0.001)
 
-    print(f"\n[INFO]  Thu được {len(raw_data)} bytes raw.")
     ser.close()
 
-    if len(raw_data) < bytes_per_raw:
-        print("[ERROR] Không đủ dữ liệu để tạo file WAV.")
-        sys.exit(1)
+    # Đảm bảo chẵn bytes (int16)
+    if len(pcm_data) % 2 != 0:
+        pcm_data = pcm_data[:-1]
 
-    # ── Chuyển đổi int32 → int16 ─────────────────────────────
-    # SPH0645 xuất 24-bit data trong frame 32-bit
-    # Bit có nghĩa nằm ở 18 bit trên → dịch phải 14 bit (giống trong main.cpp)
-    # Sau đó clamp về int16 để ghi WAV chuẩn
-    pcm_samples = []
-    num_raw     = len(raw_data) // bytes_per_raw
+    print(f"\n[INFO]  Nhận được {len(pcm_data)} bytes "
+          f"({len(pcm_data)//2} samples).")
 
-    for i in range(num_raw):
-        raw_int32 = struct.unpack_from("<i", raw_data, i * bytes_per_raw)[0]
-        sample18  = raw_int32 >> 14          # lấy 18 bit có nghĩa
-        sample16  = max(-32768, min(32767, sample18))   # clamp int16
-        pcm_samples.append(sample16)
-
-    print(f"[INFO]  Chuyển đổi xong: {len(pcm_samples)} PCM samples.")
-
-    # ── Ghi file WAV ─────────────────────────────────────────
+    # Ghi WAV trực tiếp — data đã là int16 PCM chuẩn
     with wave.open(output, "wb") as wf:
         wf.setnchannels(CHANNELS)
-        wf.setsampwidth(SAMPLE_WIDTH)       # 2 bytes = 16-bit PCM
+        wf.setsampwidth(SAMPLE_WIDTH)
         wf.setframerate(SAMPLE_RATE)
-        pcm_bytes = struct.pack(f"<{len(pcm_samples)}h", *pcm_samples)
-        wf.writeframes(pcm_bytes)
+        wf.writeframes(bytes(pcm_data))
 
-    size_kb = len(pcm_bytes) / 1024
-    print(f"[DONE]  Đã lưu: {output}  ({size_kb:.1f} KB, "
-          f"{len(pcm_samples)} samples @ {SAMPLE_RATE}Hz)")
+    kb = len(pcm_data) / 1024
+    print(f"[DONE]  Đã lưu: {output}  ({kb:.1f} KB)")
 
 
-# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    args   = parse_args()
-    output = make_output_name(args.output, args.auto_name)
-    record(
-        port     = args.port,
-        baud     = args.baud,
-        duration = args.duration,
-        output   = output
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port",      default=DEFAULT_PORT)
+    parser.add_argument("--baud",      default=DEFAULT_BAUDRATE, type=int)
+    parser.add_argument("--duration",  default=DEFAULT_DURATION,  type=float)
+    parser.add_argument("--output",    default=DEFAULT_OUTPUT)
+    parser.add_argument("--auto-name", action="store_true")
+    args = parser.parse_args()
+
+    if args.auto_name:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.output = f"rec_{ts}.wav"
+
+    record(args.port, args.baud, args.duration, args.output)
